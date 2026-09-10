@@ -43,7 +43,8 @@ jobs:
             if [[ $(cat .build/is-draft) == false ]]; then needed=false; fi
           fi
           echo "needed=$needed" >> "$GITHUB_OUTPUT"
-          tar --exclude=.git -czf .build/source.tar.gz -C .build/source .
+          # CLAUDE.md is an upstream documentation symlink; Windows extraction cannot create it.
+          tar --exclude=.git --exclude=./CLAUDE.md -czf .build/source.tar.gz -C .build/source .
       - uses: actions/upload-artifact@v4
         if: steps.source.outputs.needed == 'true'
         with:
