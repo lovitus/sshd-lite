@@ -126,6 +126,10 @@ jobs:
   verify_release:
     name: Download and test release (${{ matrix.target }})
     needs: [prepare, build]
+    # GitHub exposes draft releases only to credentials with repository push access.
+    # The token is passed only to the download step, never to the tested executable.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -142,6 +146,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: patched-source
