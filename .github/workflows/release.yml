@@ -1,0 +1,112 @@
+name: Follow upstream, test and release
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream branch, tag or commit (empty follows master)
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      upstream: ${{ steps.source.outputs.upstream }}
+      needed: ${{ steps.source.outputs.needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Fetch upstream and apply patch
+        id: source
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/prepare.sh .build/source "$UPSTREAM_REF"
+          upstream=$(cat .build/source/UPSTREAM_COMMIT)
+          tag="auth-${upstream:0:12}-${GITHUB_SHA:0:12}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          needed=true
+          if gh release view "$tag" --json isDraft --jq '.isDraft' > .build/is-draft 2>/dev/null; then
+            if [[ $(cat .build/is-draft) == false ]]; then needed=false; fi
+          fi
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          tar --exclude=.git -czf .build/source.tar.gz -C .build/source .
+      - uses: actions/upload-artifact@v4
+        if: steps.source.outputs.needed == 'true'
+        with:
+          name: patched-source
+          path: .build/source.tar.gz
+          retention-days: 7
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+      - run: mkdir source && tar -xzf source.tar.gz -C source
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+      - name: Full suite, race detector, vet and actual SSH/PTY login
+        working-directory: source
+        run: |
+          go build ./...
+          go test -race -timeout 15m ./...
+          go vet ./...
+          go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -timeout 3m .
+  release:
+    needs: [prepare, test]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+          path: .build
+      - run: mkdir .build/source && tar -xzf .build/source.tar.gz -C .build/source
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: .build/source/go.mod
+          cache-dependency-path: .build/source/go.sum
+      - name: Build portable executables and provenance
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+        run: |
+          scripts/package.sh .build/source dist "$VERSION"
+          cp .build/source.tar.gz "dist/sshd-lite_${VERSION}_source.tar.gz"
+          cp README.md dist/README.md
+          cp .build/source/UPSTREAM_COMMIT .build/source/PATCH_REPOSITORY_COMMIT dist/
+          (cd dist && sha256sum ./*.tar.gz README.md UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
+          printf 'Patched upstream: %s\nPatch repository commit: %s\n\nLinux and macOS test suites, race detector, vet, and real SSH/PTY password logins passed.\n\nSee README.md for environment and credential-file usage.\n' "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
+      - name: Publish only after all assets are uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" --target "$GITHUB_SHA" --draft --title "$VERSION" --notes-file .build/release-notes.md
+          fi
+          gh release upload "$VERSION" dist/* --clobber
+          gh release edit "$VERSION" --draft=false --latest
