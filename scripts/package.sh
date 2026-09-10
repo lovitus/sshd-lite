@@ -13,7 +13,7 @@ for target in linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64; do
   stage=$(mktemp -d)
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" GOARM=7 go build -trimpath \
     -ldflags "-s -w -X main.version=$version" -o "$stage/sshd-lite" .
-  cp LICENSE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT "$stage/"
+  cp LICENSE UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT "$stage/"
   tar -czf "$output/$name.tar.gz" -C "$stage" .
   rm -r "$stage"
 done

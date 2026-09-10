@@ -2,7 +2,7 @@
 
 Portable SSH terminal server based on [jpillora/sshd-lite](https://github.com/jpillora/sshd-lite), with `SSHD_LITE_AUTH` and `@credential-file` authentication. Virtual login names need no system accounts. Shells run as the account that starts the server.
 
-This repository maintains a small reviewed patch and a GitHub Actions pipeline. It follows upstream `master` every six hours, applies the patch, tests on Linux and macOS, and publishes binaries only after successful validation. An upstream conflict or failed test fails the workflow and leaves the last successful release available.
+This repository maintains a small reviewed patch and a GitHub Actions pipeline. It checks the latest published stable upstream Release every six hours and fetches its exact tag, applies the patch, tests on Linux and macOS, and publishes binaries only after successful validation. An upstream conflict or failed test fails the workflow and leaves the last successful release available.
 
 ## Download
 
@@ -101,7 +101,7 @@ Passwords from the file/environment do not enter the daemon's command-line argum
 
 ## Build locally
 
-Install Git and the Go version required by the fetched upstream `go.mod` (or newer):
+Install Git, an authenticated GitHub CLI (`gh`), and the Go version required by the fetched upstream `go.mod` (or newer):
 
 ```sh
 scripts/prepare.sh .build/source
@@ -112,15 +112,15 @@ go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -timeout 3
 go build -o ../../sshd-lite .
 ```
 
-`prepare.sh` only accepts a new destination. To reproduce a release, pass the full SHA from its `UPSTREAM_COMMIT` as a second argument and check out the patch repository commit recorded in that release first.
+`prepare.sh` only accepts a new destination. To reproduce a release, pass the tag from its `UPSTREAM_RELEASE` as a second argument and check out the patch repository commit recorded in that release first.
 
 ## Automatic updates and releases
 
-`.github/workflows/release.yml` runs on pushes to `main`, every six hours, and manually from **Actions → Follow upstream, test and release → Run workflow**. The optional manual input selects an upstream ref; the default tracks `master`. Pull requests are tested but cannot publish.
+`.github/workflows/release.yml` runs on pushes to `main`, every six hours, and manually from **Actions → Follow upstream, test and release → Run workflow**. The optional `upstream_release` input selects a published stable upstream Release tag; leaving it empty selects GitHub’s latest stable Release. Branches, bare commits, drafts and prereleases are not accepted. The source is fetched explicitly from `refs/tags/<release-tag>`, never from the Release’s `target_commitish` branch. Pull requests are tested but cannot publish.
 
-Each release tag combines the upstream SHA and patch repository SHA. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. Only after both OS jobs pass are assets uploaded to a draft and the release published. Linux arm builds are cross-compiled; runtime tests execute on the GitHub Linux/macOS runners.
+Each release tag combines the upstream Release tag, its resolved commit, and a fingerprint of the patches/build scripts/workflow. New commits on upstream `master` do not trigger new releases. Documentation-only changes in this repository do not trigger new releases either. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. Only after both OS jobs pass are assets uploaded to a draft and the release published. Linux arm builds are cross-compiled; runtime tests execute on the GitHub Linux/macOS runners.
 
-Only the built-in `GITHUB_TOKEN` is required; no personal token or stored user password is required by the workflow. Repository contents write permission is limited to the release job. GitHub handles scheduling and failure notifications; scheduled runs may be delayed. Check Actions if releases stop appearing. A new upstream commit is not automatically trusted to pass: patch conflicts and test failures require maintenance.
+Only the built-in `GITHUB_TOKEN` is required; no personal token or stored user password is required by the workflow. Repository contents write permission is limited to the release job. GitHub handles scheduling and failure notifications; scheduled runs may be delayed. Check Actions if releases stop appearing. A new upstream Release must pass validation: patch conflicts and test failures require maintenance.
 
 To update the patch, prepare the last compatible upstream in a disposable checkout, edit and test the source, then regenerate `patches/0001-virtual-password-auth.patch` using `git diff` against that upstream. Keep upstream source workflows out of this repository's workflow directory.
 

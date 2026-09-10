@@ -7,8 +7,8 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      upstream_ref:
-        description: Upstream branch, tag or commit (empty follows master)
+      upstream_release:
+        description: Published stable upstream release tag (empty selects latest release)
         type: string
         default: ''
 permissions:
@@ -28,12 +28,14 @@ jobs:
       - name: Fetch upstream and apply patch
         id: source
         env:
-          UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+          UPSTREAM_RELEASE: ${{ inputs.upstream_release }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/prepare.sh .build/source "$UPSTREAM_REF"
+          scripts/prepare.sh .build/source "$UPSTREAM_RELEASE"
           upstream=$(cat .build/source/UPSTREAM_COMMIT)
-          tag="auth-${upstream:0:12}-${GITHUB_SHA:0:12}"
+          upstream_release=$(cat .build/source/UPSTREAM_RELEASE)
+          patch_revision=$(git ls-tree HEAD patches scripts .github/workflows/release.yml | git hash-object --stdin)
+          tag="${upstream_release}-auth.${upstream:0:12}.${patch_revision:0:12}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
           needed=true
@@ -97,9 +99,9 @@ jobs:
           scripts/package.sh .build/source dist "$VERSION"
           cp .build/source.tar.gz "dist/sshd-lite_${VERSION}_source.tar.gz"
           cp README.md dist/README.md
-          cp .build/source/UPSTREAM_COMMIT .build/source/PATCH_REPOSITORY_COMMIT dist/
-          (cd dist && sha256sum ./*.tar.gz README.md UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
-          printf 'Patched upstream: %s\nPatch repository commit: %s\n\nLinux and macOS test suites, race detector, vet, and real SSH/PTY password logins passed.\n\nSee README.md for environment and credential-file usage.\n' "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
+          cp .build/source/UPSTREAM_RELEASE .build/source/UPSTREAM_COMMIT .build/source/PATCH_REPOSITORY_COMMIT dist/
+          (cd dist && sha256sum ./*.tar.gz README.md UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
+          printf 'Upstream release: %s\nPatched upstream: %s\nPatch repository commit: %s\n\nLinux and macOS test suites, race detector, vet, and real SSH/PTY password logins passed.\n\nSee README.md for environment and credential-file usage.\n' "$(cat .build/source/UPSTREAM_RELEASE)" "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
       - name: Publish only after all assets are uploaded
         env:
           GH_TOKEN: ${{ github.token }}
