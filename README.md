@@ -2,7 +2,7 @@
 
 Portable SSH terminal server based on [jpillora/sshd-lite](https://github.com/jpillora/sshd-lite), with `SSHD_LITE_AUTH` and `@credential-file` authentication. Virtual login names need no system accounts. Shells run as the account that starts the server.
 
-This repository maintains a small reviewed patch and a GitHub Actions pipeline. It checks the latest published stable upstream Release every six hours and fetches its exact tag, applies the patch, tests on Linux and macOS, and publishes binaries only after successful validation. An upstream conflict or failed test fails the workflow and leaves the last successful release available.
+This repository maintains a small reviewed patch and a GitHub Actions pipeline. It checks the latest published stable upstream Release every six hours and fetches its exact tag, applies the patch, tests on Linux, macOS and Windows, and publishes binaries only after successful validation. An upstream conflict or failed test fails the workflow and leaves the last successful release available.
 
 ## Download
 
@@ -10,10 +10,11 @@ Download from this repository's **Releases** page. Each release includes:
 
 - Linux amd64, arm64, and armv7 executables in `.tar.gz` archives (CGO disabled).
 - macOS amd64 and arm64 executables in `.tar.gz` archives.
+- Windows amd64 and arm64 executables (`sshd-lite.exe`) in `.zip` archives.
 - The complete patched source archive, its exact upstream commit, the patch repository commit, and `SHA256SUMS`.
 
 Extract the archive for your machine. The executable inside is named `sshd-lite`.
-These releases target Linux and macOS. Windows binaries are not published: the supplied credential-file checks use Unix permissions and have not been adapted to Windows ACLs.
+Windows uses PowerShell and ConPTY for interactive terminals. Use a modern 64-bit Windows installation with ConPTY support. Windows credential files are checked using their actual Windows DACL, not Unix mode bits.
 
 ## Environment authentication
 
@@ -72,7 +73,7 @@ Start with the file; environment users are merged automatically if the variable 
 - Empty or malformed explicitly configured sources fail startup. Use `unset SSHD_LITE_AUTH` to disable the environment source.
 - The first colon separates username and password. Password spaces and additional colons are preserved. LF and CRLF files work; blank lines are ignored; comments are not supported.
 - Each source is limited to 16 KiB; the merged user set is limited to 1,024 users.
-- Files must be regular files with no group/other permissions, normally `0600` or `0400`.
+- Files must be regular files. On Unix, no group/other permissions are allowed (normally `0600` or `0400`). On Windows, the owner and every access-granting DACL entry must be the current user, SYSTEM or Administrators; missing/null DACLs and unsupported access-entry forms are rejected.
 - Credentials load at startup; restart to reload. Existing sessions are not revoked.
 - Existing CLI password, authorized-key, GitHub-key and `none` modes remain available when the variable is unset. Mixing environment passwords with key or `none` modes fails startup.
 
@@ -94,6 +95,34 @@ For cron, place the executable at `$HOME/vssh/sshd-lite` and use:
 ```
 
 An interactive shell export does not configure cron's environment.
+
+## Windows usage
+
+Extract the Windows ZIP, then start from PowerShell:
+
+```powershell
+$env:SSHD_LITE_AUTH = 'bob:REPLACE_WITH_A_LONG_PASSWORD'
+.\sshd-lite.exe --host 127.0.0.1 --port 22222
+```
+
+Connect with `ssh -p 22222 bob@127.0.0.1`. For multiple environment users, use a PowerShell multiline string. `Remove-Item Env:SSHD_LITE_AUTH` disables the environment source.
+
+For a password file, create it and restrict its ACL before entering credentials:
+
+```powershell
+$path = Join-Path $HOME 'sshd-lite-users.txt'
+New-Item -ItemType File -Path $path
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = [System.Security.AccessControl.FileSecurity]::new()
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
+Set-Acl -LiteralPath $path -AclObject $acl
+notepad $path
+.\sshd-lite.exe --host 127.0.0.1 --port 22222 "@$path"
+```
+
+Save as UTF-8 without a BOM, one `username:password` per line. Environment/file merge rules are identical on every platform. These virtual users run as the Windows account that launched the daemon.
 
 ## Authentication scope
 
@@ -118,9 +147,9 @@ go build -o ../../sshd-lite .
 
 `.github/workflows/release.yml` runs on pushes to `main`, every six hours, and manually from **Actions → Follow upstream, test and release → Run workflow**. The optional `upstream_release` input selects a published stable upstream Release tag; leaving it empty selects GitHub’s latest stable Release. Branches, bare commits, drafts and prereleases are not accepted. The source is fetched explicitly from `refs/tags/<release-tag>`, never from the Release’s `target_commitish` branch. Pull requests are tested but cannot publish.
 
-Each release tag combines the upstream Release tag, its resolved commit, and a fingerprint of the patches/build scripts/workflow. New commits on upstream `master` do not trigger new releases. Documentation-only changes in this repository do not trigger new releases either. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. Only after both OS jobs pass are assets uploaded to a draft and the release published. Linux arm builds are cross-compiled; runtime tests execute on the GitHub Linux/macOS runners.
+Each release tag combines the upstream Release tag, its resolved commit, and a fingerprint of the patches/build scripts/workflow. New commits on upstream `master` do not trigger new releases. Documentation-only changes in this repository do not trigger new releases either. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. On Windows, the upstream vendored ConPTY unsafe-pointer vet findings are excluded from the module-wide vet pass; our root authentication package still receives the normal vet checks. After all three source-test jobs pass, all archives are uploaded to a draft Release. Linux amd64, macOS arm64 and Windows amd64 runners then download the actual GitHub Release archives, verify SHA-256, extract them and execute the packaged programs without rebuilding the daemon. They check environment-only, file-only and merged login, rejected passwords, process identity, credential environment cleanup, SFTP writes, exit status and interactive terminals. Only when every downloaded-executable test passes is the Release published. Linux arm/arm64, macOS amd64 and Windows arm64 are cross-compiled; they do not yet have native runtime coverage.
 
-Only the built-in `GITHUB_TOKEN` is required; no personal token or stored user password is required by the workflow. Repository contents write permission is limited to the release job. GitHub handles scheduling and failure notifications; scheduled runs may be delayed. Check Actions if releases stop appearing. A new upstream Release must pass validation: patch conflicts and test failures require maintenance.
+Only the built-in `GITHUB_TOKEN` is required; no personal token or stored user password is required by the workflow. Repository contents write permission is limited to draft upload and publication jobs. GitHub handles scheduling and failure notifications; scheduled runs may be delayed. Check Actions if releases stop appearing. A new upstream Release must pass validation: patch conflicts and test failures require maintenance.
 
 To update the patch, prepare the last compatible upstream in a disposable checkout, edit and test the source, then regenerate `patches/0001-virtual-password-auth.patch` using `git diff` against that upstream. Keep upstream source workflows out of this repository's workflow directory.
 

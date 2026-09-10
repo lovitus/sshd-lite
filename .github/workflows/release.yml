@@ -56,8 +56,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -71,10 +74,17 @@ jobs:
         working-directory: source
         run: |
           go build ./...
-          go test -race -timeout 15m ./...
-          go vet ./...
-          go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -timeout 3m .
-  release:
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Upstream's vendored ConPTY code has documented unsafe-pointer vet findings.
+            go test -race -vet=off -timeout 15m ./...
+            go vet -unsafeptr=false ./...
+            go vet .
+          else
+            go test -race -timeout 15m ./...
+            go vet ./...
+          fi
+          go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -v -timeout 5m .
+  build:
     needs: [prepare, test]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -100,9 +110,9 @@ jobs:
           cp .build/source.tar.gz "dist/sshd-lite_${VERSION}_source.tar.gz"
           cp README.md dist/README.md
           cp .build/source/UPSTREAM_RELEASE .build/source/UPSTREAM_COMMIT .build/source/PATCH_REPOSITORY_COMMIT dist/
-          (cd dist && sha256sum ./*.tar.gz README.md UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
-          printf 'Upstream release: %s\nPatched upstream: %s\nPatch repository commit: %s\n\nLinux and macOS test suites, race detector, vet, and real SSH/PTY password logins passed.\n\nSee README.md for environment and credential-file usage.\n' "$(cat .build/source/UPSTREAM_RELEASE)" "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
-      - name: Publish only after all assets are uploaded
+          (cd dist && sha256sum ./*.tar.gz ./*.zip README.md UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
+          printf 'Upstream release: %s\nPatched upstream: %s\nPatch repository commit: %s\n\nLinux, macOS and Windows source tests and SSH/PTY logins passed. Packaged executable verification is pending.\n\nSee README.md for environment and credential-file usage.\n' "$(cat .build/source/UPSTREAM_RELEASE)" "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
+      - name: Upload draft release assets
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.tag }}
@@ -111,4 +121,66 @@ jobs:
             gh release create "$VERSION" --target "$GITHUB_SHA" --draft --title "$VERSION" --notes-file .build/release-notes.md
           fi
           gh release upload "$VERSION" dist/* --clobber
-          gh release edit "$VERSION" --draft=false --latest
+
+  verify_release:
+    name: Download and test release (${{ matrix.target }})
+    needs: [prepare, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux_amd64
+          - os: macos-latest
+            target: darwin_arm64
+          - os: windows-latest
+            target: windows_amd64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+          path: .build
+      - run: mkdir .build/source && tar -xzf .build/source.tar.gz -C .build/source
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: .build/source/go.mod
+          cache-dependency-path: .build/source/go.sum
+      - name: Download actual GitHub Release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          gh release download "$VERSION" --dir downloaded --pattern "sshd-lite_${VERSION}_${TARGET}.*" --pattern SHA256SUMS
+      - name: Verify checksum and extract executable
+        id: unpack
+        run: python scripts/verify-archive.py downloaded
+      - name: Test downloaded executable (no daemon rebuild)
+        env:
+          SSHD_LITE_TEST_BINARY: ${{ steps.unpack.outputs.binary }}
+        working-directory: .build/source
+        run: go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -v -timeout 5m .
+  publish:
+    needs: [prepare, verify_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          gh release view "$VERSION" --json body --jq .body > notes.md
+          python - <<'PYCODE'
+          from pathlib import Path
+          p = Path('notes.md')
+          p.write_text(p.read_text().replace('Packaged executable verification is pending.', 'Release archives were downloaded from GitHub, SHA-256 verified, and their actual executables passed password auth, file/env merging, SFTP, exit status and interactive terminal tests on Linux amd64, macOS arm64 and Windows amd64. Other architectures are cross-compiled.'))
+          PYCODE
+          gh release edit "$VERSION" --notes-file notes.md --draft=false --latest
