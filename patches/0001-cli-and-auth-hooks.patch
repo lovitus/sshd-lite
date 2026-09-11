@@ -40,7 +40,7 @@ index 92c5e17..7315c6a 100644
  `
  
  type serverCommand struct {
-+	WindowsPTY string `opts:"name=windows-pty,help=Windows terminal backend: auto (default) / conpty / winpty"`
++	WindowsPTY string `opts:"name=windows-pty,short=-,help=Windows terminal backend: auto (default) / conpty / winpty"`
  	sshd.Config
 -	Mosh    bool   `opts:"name=mosh,help=enable Mosh on the same UDP port (five-minute idle timeout)"`
 -	Command string `opts:"mode=cmdname"`
