@@ -24,7 +24,7 @@ func newAPI() (*api, error) {
 		return nil, err
 	}
 	a := &api{p: map[string]*windows.Proc{}}
-	for _, name := range []string{"config_new", "config_free", "config_set_initial_size", "config_set_agent_timeout", "open", "conin_name", "conout_name", "spawn_config_new", "spawn_config_free", "spawn", "set_size", "free", "error_code", "error_free"} {
+	for _, name := range []string{"config_new", "config_free", "config_set_initial_size", "config_set_agent_timeout", "open", "agent_process", "conin_name", "conout_name", "spawn_config_new", "spawn_config_free", "spawn", "set_size", "free", "error_code", "error_free"} {
 		proc, err := dll.FindProc("winpty_" + name)
 		if err != nil {
 			return nil, err
@@ -78,10 +78,27 @@ func (p *PTY) Close() error {
 	if p.handle == 0 {
 		return nil
 	}
-	// winpty_free terminates the agent and attached console processes.
+	// Retain a waitable agent handle before free closes the library's handle.
+	// The image stays locked until the agent exits, even after winpty_free.
+	original := windows.Handle(p.api.call("agent_process", p.handle))
+	var agent windows.Handle
+	current := windows.CurrentProcess()
+	duplicateErr := windows.DuplicateHandle(current, original, current, &agent, 0, false, windows.DUPLICATE_SAME_ACCESS)
 	p.api.call("free", p.handle)
 	p.handle = 0
-	return errorsJoin(p.in.Close(), p.out.Close())
+	pipeErr := errorsJoin(p.in.Close(), p.out.Close())
+	if duplicateErr != nil {
+		return duplicateErr
+	}
+	defer windows.CloseHandle(agent)
+	status, err := windows.WaitForSingleObject(agent, 5000)
+	if err != nil {
+		return err
+	}
+	if status != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("WinPTY agent did not exit within 5 seconds")
+	}
+	return pipeErr
 }
 func errorsJoin(a, b error) error {
 	if a != nil {
