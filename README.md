@@ -14,7 +14,7 @@ Download from this repository's **Releases** page. Each release includes:
 - The complete patched source archive, its exact upstream commit, the patch repository commit, and `SHA256SUMS`.
 
 Extract the archive for your machine. The executable inside is named `sshd-lite`.
-Windows uses PowerShell and ConPTY for interactive terminals. Use a modern 64-bit Windows installation with ConPTY support. Windows credential files are checked using their actual Windows DACL, not Unix mode bits.
+Windows uses PowerShell and ConPTY for interactive terminals on Windows 10 1809 / Server 2019 or newer. When ConPTY APIs are missing, it automatically uses a basic pipe shell; connect with `ssh -T`. This supports line-oriented commands, not full-screen programs, terminal resizing or terminal Ctrl-C behavior. `--no-pty` forces the same mode for troubleshooting. The Go runtime still requires Windows 10 / Server 2016 or newer; Windows 7/8 and Server 2012 are not supported. Windows credential files are checked using their actual Windows DACL, not Unix mode bits.
 
 ## Environment authentication
 
@@ -77,7 +77,21 @@ Start with the file; environment users are merged automatically if the variable 
 - Credentials load at startup; restart to reload. Existing sessions are not revoked.
 - Existing CLI password, authorized-key, GitHub-key and `none` modes remain available when the variable is unset. Mixing environment passwords with key or `none` modes fails startup.
 
-For continued use, generate a persistent host key once:
+## Persistent host identity
+
+Without `--keyfile` or `--keyseed`, the CLI creates a random Ed25519 host key once and reuses it across restarts. The default path belongs to the account running the daemon:
+
+- Windows: `%AppData%\sshd-lite\host_key`
+- Linux: `$XDG_CONFIG_HOME/sshd-lite/host_key`, or `$HOME/.config/sshd-lite/host_key`
+- macOS: `$HOME/Library/Application Support/sshd-lite/host_key`
+
+The startup log prints the actual path. Changing the working directory or replacing the executable does not change the key. Keep this file when upgrading and persist the config directory when running in a container. Changing the service account or its config-directory environment can select a different key. Separate instances under the same account share the default key; use separate explicit `--keyfile` paths if they need distinct identities.
+
+Unix keys are created with mode `0600`; Windows keys have a private DACL from creation. A corrupt, unreadable or insecure default key stops startup rather than silently generating a replacement. Concurrent first startups atomically select the same completed key. The configuration filesystem must support hard links (such as NTFS on Windows); otherwise provide an existing `--keyfile` on a suitable filesystem. Explicit `--keyfile` and `--keyseed` retain their existing behavior. The Go library default is unchanged; persistence is a CLI feature.
+
+Upgrading from the old ephemeral default introduces one final new fingerprint. Verify it against the server's startup log before updating the specific `known_hosts` entry. Already configured persistent keys do not change.
+
+To choose your own key location, generate a persistent host key once:
 
 ```sh
 ssh-keygen -t ed25519 -N '' -f "$HOME/vssh/host_key"
@@ -137,7 +151,7 @@ scripts/prepare.sh .build/source
 cd .build/source
 go test -race -timeout 15m ./...
 go vet ./...
-go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -timeout 3m .
+go test -race -tags=integration -run 'TestVirtualAuthEndToEnd|TestCompatibilityEndToEnd' -count=1 -timeout 3m .
 go build -o ../../sshd-lite .
 ```
 
@@ -147,7 +161,7 @@ go build -o ../../sshd-lite .
 
 `.github/workflows/release.yml` runs on pushes to `main`, every six hours, and manually from **Actions → Follow upstream, test and release → Run workflow**. The optional `upstream_release` input selects a published stable upstream Release tag; leaving it empty selects GitHub’s latest stable Release. Branches, bare commits, drafts and prereleases are not accepted. The source is fetched explicitly from `refs/tags/<release-tag>`, never from the Release’s `target_commitish` branch. Pull requests are tested but cannot publish.
 
-Each release tag combines the upstream Release tag, its resolved commit, and a fingerprint of the patches/build scripts/workflow. New commits on upstream `master` do not trigger new releases. Documentation-only changes in this repository do not trigger new releases either. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. On Windows, the upstream vendored ConPTY unsafe-pointer vet findings are excluded from the module-wide vet pass; our root authentication package still receives the normal vet checks. After all three source-test jobs pass, all archives are uploaded to a draft Release. Linux amd64, macOS arm64 and Windows amd64 runners then download the actual GitHub Release archives, verify SHA-256, extract them and execute the packaged programs without rebuilding the daemon. They check environment-only, file-only and merged login, rejected passwords, process identity, credential environment cleanup, SFTP writes, exit status and interactive terminals. Only when every downloaded-executable test passes is the Release published. Linux arm/arm64, macOS amd64 and Windows arm64 are cross-compiled; they do not yet have native runtime coverage.
+Each release tag combines the upstream Release tag, its resolved commit, and a fingerprint of the patches/build scripts/workflow. New commits on upstream `master` do not trigger new releases. Documentation-only changes in this repository do not trigger new releases either. An already published combination is skipped. The pipeline downloads upstream once, applies patches with `git apply --check`, and uses that same source archive for testing and builds. Tests cover the full upstream suite with the race detector, vet, and actual password SSH logins plus interactive PTY sessions. On Windows, the upstream vendored ConPTY unsafe-pointer vet findings are excluded from the module-wide vet pass; our root authentication package still receives the normal vet checks. After all three source-test jobs pass, all archives are uploaded to a draft Release. Linux amd64, macOS arm64 and Windows amd64 runners then download the actual GitHub Release archives, verify SHA-256, extract them and execute the packaged programs without rebuilding the daemon. They also check that restarting the executable from a different working directory preserves its host fingerprint, and that `--no-pty` rejects PTY allocation while providing a basic shell with working stdin, output and exit status (PowerShell and cmd.exe on Windows). Missing ConPTY procedure detection is unit-tested on Windows. Hosted runners use modern Windows; these tests do not constitute execution on an old Windows installation. They check environment-only, file-only and merged login, rejected passwords, process identity, credential environment cleanup, SFTP writes, exit status and interactive terminals. Only when every downloaded-executable test passes is the Release published. Linux arm/arm64, macOS amd64 and Windows arm64 are cross-compiled; they do not yet have native runtime coverage.
 
 Only the built-in `GITHUB_TOKEN` is required; no personal token or stored user password is required by the workflow. Repository contents write permission is limited to draft upload/download and publication jobs. GitHub requires push access to see draft releases; the download job supplies its token only to the download step and disables persisted checkout credentials. GitHub handles scheduling and failure notifications; scheduled runs may be delayed. Check Actions if releases stop appearing. A new upstream Release must pass validation: patch conflicts and test failures require maintenance.
 
