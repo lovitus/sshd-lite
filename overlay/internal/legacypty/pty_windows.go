@@ -33,6 +33,10 @@ func newAPI() (*api, error) {
 	}
 	return a, nil
 }
+
+// Keep Go pointers passed through the uintptr FFI wrapper alive and stable.
+//
+//go:uintptrescapes
 func (a *api) call(name string, args ...uintptr) uintptr {
 	v, _, _ := a.p[name].Call(args...)
 	return v

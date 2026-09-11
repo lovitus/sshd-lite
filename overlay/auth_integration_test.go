@@ -219,6 +219,17 @@ func TestVirtualAuthEndToEnd(t *testing.T) {
 					if err := ptySession.Shell(); err != nil {
 						t.Fatal(err)
 					}
+					if os.Getenv("SSHD_LITE_TEST_WINDOWS_PTY") == "winpty" {
+						if err := ptySession.WindowChange(35, 100); err != nil {
+							t.Fatal(err)
+						}
+						// Wait inside the child for the asynchronous SSH resize;
+						// assert real Console dimensions rather than request acceptance.
+						resize := `for ($i=0; $i -lt 100; $i++) { if ([Console]::WindowWidth -eq 100 -and [Console]::WindowHeight -eq 35) { break }; Start-Sleep -Milliseconds 20 }; if ([Console]::WindowWidth -ne 100 -or [Console]::WindowHeight -ne 35) { exit 9 }` + "\r\n"
+						if _, err := io.WriteString(stdin, resize); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if _, err := io.WriteString(stdin, terminalCommand); err != nil {
 						t.Fatal(err)
 					}
