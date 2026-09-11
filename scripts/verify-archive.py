@@ -8,7 +8,7 @@ import tarfile
 import zipfile
 
 folder = Path(sys.argv[1]).resolve()
-archives = list(folder.glob('*.tar.gz')) + list(folder.glob('*.zip'))
+archives = list(folder.glob('*.tar.gz')) + list(folder.glob('*.zip')) + list(folder.glob('*.exe'))
 if len(archives) != 1:
     raise SystemExit('Expected exactly one platform archive')
 archive = archives[0]
@@ -18,7 +18,10 @@ if hashlib.sha256(archive.read_bytes()).hexdigest() != checks.get(archive.name):
     raise SystemExit('Release archive checksum mismatch')
 dest = folder / 'unpacked'
 dest.mkdir()
-if archive.suffix == '.zip':
+if archive.suffix == '.exe':
+    import shutil
+    shutil.copyfile(archive, dest / 'sshd-lite.exe')
+elif archive.suffix == '.zip':
     with zipfile.ZipFile(archive) as bundle:
         for entry in bundle.namelist():
             if Path(entry).name != entry or entry in ('.', '..'):

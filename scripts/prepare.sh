@@ -27,6 +27,18 @@ for patch in "$root"/patches/*.patch; do
   git -C "$dest" apply --check "$patch"
   git -C "$dest" apply "$patch"
 done
+# Owned implementation files stay outside contextual upstream patches.
+if [[ -d "$root/overlay" ]]; then
+  while IFS= read -r -d '' file; do
+    relative=${file#"$root/overlay/"}
+    if [[ -e "$dest/$relative" ]]; then
+      echo "Overlay would overwrite upstream file: $relative" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$dest/$relative")"
+    cp "$file" "$dest/$relative"
+  done < <(find "$root/overlay" -type f -print0)
+fi
 printf '%s\n' "$release_tag" > "$dest/UPSTREAM_RELEASE"
 printf '%s\n' "$upstream" > "$dest/UPSTREAM_COMMIT"
 printf '%s\n' "$(git -C "$root" rev-parse HEAD)" > "$dest/PATCH_REPOSITORY_COMMIT"

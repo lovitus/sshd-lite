@@ -1,0 +1,238 @@
+diff --git a/main.go b/main.go
+index 92c5e17..7315c6a 100644
+--- a/main.go
++++ b/main.go
+@@ -16,6 +16,7 @@ import (
+ 
+ 	"github.com/jpillora/opts"
+ 	"github.com/jpillora/sshd-lite/client"
++	"github.com/jpillora/sshd-lite/internal/terminal"
+ 	"github.com/jpillora/sshd-lite/mosh"
+ 	"github.com/jpillora/sshd-lite/sshd"
+ 	"github.com/jpillora/sshd-lite/xssh"
+@@ -24,17 +25,23 @@ import (
+ var version string = "0.0.0-src" //set via ldflags
+ 
+ const authArg = `
+-<auth> must be set to one of:
++<auth> selects authentication (optional when SSHD_LITE_AUTH is set):
+ 1. a username and password string separated by a colon ("myuser:mypass")
+ 2. a path to an ssh authorized_keys file ("~/.ssh/authorized_keys"); entries
+    must be unrestricted, and any entry with options makes the file invalid
+ 3. a GitHub user ("github.com/myuser"); public keys are fetched from .keys
+ 4. "none" to disable client authentication :WARNING: very insecure
++5. @/path/users.txt for newline-separated username:password records
++
++SSHD_LITE_AUTH accepts newline-separated username:password records.
++Environment records override matching file/CLI users. Invalid sources fail startup.
++Credentials load once at startup; sessions run as the daemon owner.
+ `
+ 
+ const notes = `
+ Notes:
+-* if no keyfile and no keyseed are set, a random 2048-bit RSA key is used
++* if no keyfile and no keyseed are set, a host key is saved in the user config
++  directory under sshd-lite/host_key and reused on restart
+ * authorized_keys files are validated at startup and reloaded for every public
+   key authentication; a failed reload denies authentication until the file is
+   valid again, and any entry with options makes the entire file invalid
+@@ -53,9 +60,11 @@ Notes:
+ `
+ 
+ type serverCommand struct {
++	WindowsPTY string `opts:"name=windows-pty,help=Windows terminal backend: auto (default) / conpty / winpty"`
+ 	sshd.Config
+-	Mosh    bool   `opts:"name=mosh,help=enable Mosh on the same UDP port (five-minute idle timeout)"`
+-	Command string `opts:"mode=cmdname"`
++	Auth    []string `opts:"mode=arg,name=auth,min=0,max=1"`
++	Mosh    bool     `opts:"name=mosh,help=enable Mosh on the same UDP port (five-minute idle timeout)"`
++	Command string   `opts:"mode=cmdname"`
+ }
+ 
+ type clientCommand struct {
+@@ -114,6 +123,22 @@ func runClient(ctx context.Context, c *clientCommand) (int, error) {
+ }
+ 
+ func runServer(ctx context.Context, c *serverCommand) error {
++	if len(c.Auth) > 0 {
++		c.AuthType = c.Auth[0]
++	}
++	auth, passwordAuth, err := resolveAuthentication(c.AuthType)
++	if err != nil {
++		return err
++	}
++	c.AuthType, c.PasswordAuth = auth, passwordAuth
++	if err := configureHostKey(&c.Config); err != nil {
++		return err
++	}
++	if err := terminal.ConfigureWindowsBackend(c.WindowsPTY); err != nil {
++		return err
++	}
++	defer terminal.CloseWindowsBackend()
++
+ 	if c.Mosh {
+ 		c.Attach = func(ctx context.Context, addr net.Addr) (xssh.ExecHandler, io.Closer, error) {
+ 			handler, closer, err := mosh.Attach(ctx, addr)
+@@ -196,7 +221,7 @@ func rootBoolFlag(arg string) bool {
+ 	switch arg {
+ 	case "--keyseed-ec", "--noenv", "--no-client-env", "-n", "--no-inherit-env", "--no-global-env",
+ 		"--verbose", "-v", "--quiet", "-q", "--sftp", "-s", "--sftp-wd",
+-		"--tcp-forwarding", "-t", "--mosh", "--version", "--help":
++		"--tcp-forwarding", "-t", "--no-pty", "--mosh", "--version", "--help":
+ 		return true
+ 	default:
+ 		return false
+diff --git a/main_test.go b/main_test.go
+index 08a360d..0e27fba 100644
+--- a/main_test.go
++++ b/main_test.go
+@@ -103,7 +103,7 @@ func TestCLIKeepsDaemonPositionalAuth(t *testing.T) {
+ 	if _, err := cli.ParseArgsError([]string{"sshd-lite", "user:pass", "--port", "2222"}); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if server.Command != "" || server.AuthType != "user:pass" || server.Port != "2222" {
++	if server.Command != "" || !reflect.DeepEqual(server.Auth, []string{"user:pass"}) || server.Port != "2222" {
+ 		t.Fatalf("server=%#v", server)
+ 	}
+ }
+diff --git a/sshd/config.go b/sshd/config.go
+index f139fa3..570b194 100644
+--- a/sshd/config.go
++++ b/sshd/config.go
+@@ -22,6 +22,7 @@ const (
+ 
+ // Config is the configuration for the server
+ type Config struct {
++	NoPTY     bool   `opts:"name=no-pty,help=use a basic pipe shell without terminal emulation"`
+ 	Host      string `opts:"help=listening interface (defaults to all)"`
+ 	Port      string `opts:"short=p,help=listening port (defaults to 22 then fallsback to 2200)"`
+ 	Shell     string `opts:"help=the shell to use for remote sessions, env=SHELL,default=bash/powershell"`
+@@ -29,7 +30,7 @@ type Config struct {
+ 	KeyFile   string `opts:"name=keyfile,help=a filepath to a private key (for example an 'id_rsa' file)"`
+ 	KeySeed   string `opts:"name=keyseed,env,help=a string to use to seed key generation"`
+ 	KeySeedEC bool   `opts:"name=keyseed-ec,env,help=use elliptic curve for key generation"`
+-	AuthType  string `opts:"mode=arg,name=auth"`
++	AuthType  string `opts:"-"`
+ 	KeepAlive int    `opts:"name=keepalive,help=server keep alive interval seconds (0 to disable)"`
+ 	// HandshakeTimeout is the maximum time allowed for an SSH handshake.
+ 	// Zero selects DefaultHandshakeTimeout; a negative duration disables it.
+@@ -63,6 +64,10 @@ type Config struct {
+ 	// AuthKeys authorizes these programmatic keys without authorized_keys options
+ 	// or per-key restrictions.
+ 	AuthKeys []ssh.PublicKey `opts:"-"`
++	// PasswordAuth optionally authenticates virtual usernames and passwords.
++	// It must be safe for concurrent calls and is exclusive with AuthType and
++	// AuthKeys. It does not select an OS identity or change shell privileges.
++	PasswordAuth func(username string, password []byte) bool `opts:"-" json:"-"`
+ 	// ConnectionHandler is called when a new SSH connection is established.
+ 	// The context is cancelled when the connection closes. The handler runs
+ 	// asynchronously and is not awaited during server shutdown.
+diff --git a/sshd/server.go b/sshd/server.go
+index 9242740..e4291b7 100644
+--- a/sshd/server.go
++++ b/sshd/server.go
+@@ -58,6 +58,7 @@ func NewServer(c Config) (*Server, error) {
+ 		NoClientEnv:            c.NoClientEnv || c.IgnoreEnv,
+ 		NoInheritEnv:           c.NoInheritEnv,
+ 		NoGlobalEnv:            c.NoGlobalEnv,
++		NoPTY:                  c.NoPTY,
+ 		WorkingDirectory:       s.config.WorkDir,
+ 		Shell:                  s.config.Shell, // absolute path, resolved once by computeSSHConfig
+ 		Session:                true,
+diff --git a/sshd/server_config.go b/sshd/server_config.go
+index 1ea3509..1004ea4 100644
+--- a/sshd/server_config.go
++++ b/sshd/server_config.go
+@@ -22,6 +22,9 @@ const maxAuthorizedKeysFileSize = 1 << 20
+ var errAuthenticationDenied = errors.New("denied")
+ 
+ func (s *Server) computeSSHConfig() (*ssh.ServerConfig, error) {
++	if s.config.PasswordAuth != nil && (s.config.AuthType != "" || len(s.config.AuthKeys) > 0) {
++		return nil, fmt.Errorf("cannot combine PasswordAuth with AuthType or AuthKeys")
++	}
+ 	sc := &ssh.ServerConfig{}
+ 	shellPath, err := xssh.ShellPath(s.config.Shell)
+ 	if err != nil {
+@@ -63,8 +66,16 @@ func (s *Server) computeSSHConfig() (*ssh.ServerConfig, error) {
+ 	s.infof("Private key loaded")
+ 	s.infof("Public Key: %s", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pri.PublicKey()))))
+ 	s.infof("Fingerprint: %s", key.Fingerprint(pri.PublicKey()))
+-	//setup auth - if AuthKeys are set, use them exclusively
+-	if len(s.config.AuthKeys) > 0 {
++	// Authentication modes are exclusive; never fall back on a failed password.
++	if verify := s.config.PasswordAuth; verify != nil {
++		sc.PasswordCallback = func(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
++			if verify(conn.User(), pass) {
++				return nil, nil
++			}
++			return nil, errAuthenticationDenied
++		}
++		s.infof("Authentication enabled (virtual-user passwords)")
++	} else if len(s.config.AuthKeys) > 0 {
+ 		if s.config.AuthType != "" {
+ 			return nil, fmt.Errorf("cannot use AuthType with AuthKeys")
+ 		}
+diff --git a/xssh/config.go b/xssh/config.go
+index 8c5753c..67c8ee7 100644
+--- a/xssh/config.go
++++ b/xssh/config.go
+@@ -32,6 +32,8 @@ const (
+ // Config is the configuration for an xssh.Conn.
+ // It provides handlers for global requests, channels, and session requests.
+ type Config struct {
++	// NoPTY uses a pipe shell and rejects PTY allocation requests.
++	NoPTY bool
+ 	// Logger for debug and error messages. If nil, logging is disabled.
+ 	Logger *slog.Logger
+ 	// KeepAlive interval in seconds. If > 0, sends periodic ping requests.
+diff --git a/xssh/session_handler.go b/xssh/session_handler.go
+index d0a3205..b6f45ed 100644
+--- a/xssh/session_handler.go
++++ b/xssh/session_handler.go
+@@ -22,7 +22,12 @@ func (c *xconn) registerSessionHandlers() {
+ 			c.config.Shell = path
+ 		}
+ 	}
+-	c.sessionRequestHandlers[PTYRequestType] = handlePtyReq
++	c.sessionRequestHandlers[PTYRequestType] = func(sess *Session, req *Request) error {
++		if sess.Config().NoPTY {
++			return fmt.Errorf("PTY unavailable; use ssh -T for the basic pipe shell")
++		}
++		return handlePtyReq(sess, req)
++	}
+ 	c.sessionRequestHandlers[WindowChangeRequestType] = handleWindowChange
+ 	c.sessionRequestHandlers[EnvRequestType] = handleEnv
+ 	c.sessionRequestHandlers[ShellRequestType] = handleShell
+@@ -209,6 +214,18 @@ func handleShell(sess *Session, req *Request) error {
+ 	if len(req.Payload) > 0 {
+ 		debugf(sess, "shell command ignored '%s'", req.Payload)
+ 	}
++	if sess.Config().NoPTY {
++		if req.WantReply {
++			if err := req.Reply(true, nil); err != nil {
++				return err
++			}
++		}
++		if err := attachPipeShell(sess); err != nil {
++			commandSetupFailed(sess, "basic shell failed", err)
++			sess.Channel.Close()
++		}
++		return nil
++	}
+ 	return attachShell(sess)
+ }
+ 
+diff --git a/xssh/shell.go b/xssh/shell.go
+index 79a1c4c..9261434 100644
+--- a/xssh/shell.go
++++ b/xssh/shell.go
+@@ -14,6 +14,9 @@ import (
+ // attachShell attaches a shell to the session
+ func attachShell(sess *Session) error {
+ 	cfg := sess.Config()
++	if cfg.NoPTY {
++		return attachPipeShell(sess)
++	}
+ 	shell := terminal.Command(cfg.Shell, nil)
+ 	var process *terminal.Process
+ 	if cfg.WorkingDirectory != "" {

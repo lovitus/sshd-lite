@@ -17,6 +17,7 @@ for target in linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 window
     -ldflags "-s -w -X main.version=$version" -o "$stage/$binary" .
   cp LICENSE UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT "$stage/"
   if [[ "$os" == windows ]]; then
+    cp "$stage/$binary" "$output/$name.exe"
     (cd "$stage" && zip -q "$output/$name.zip" ./*)
   else
     tar -czf "$output/$name.tar.gz" -C "$stage" .

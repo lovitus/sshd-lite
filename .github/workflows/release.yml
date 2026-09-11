@@ -34,7 +34,7 @@ jobs:
           scripts/prepare.sh .build/source "$UPSTREAM_RELEASE"
           upstream=$(cat .build/source/UPSTREAM_COMMIT)
           upstream_release=$(cat .build/source/UPSTREAM_RELEASE)
-          patch_revision=$(git ls-tree HEAD patches scripts .github/workflows/release.yml | git hash-object --stdin)
+          patch_revision=$(git ls-tree HEAD patches overlay scripts .github/workflows/release.yml | git hash-object --stdin)
           tag="${upstream_release}-auth.${upstream:0:12}.${patch_revision:0:12}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
@@ -85,6 +85,9 @@ jobs:
             go vet ./...
           fi
           go test -race -tags=integration -run 'TestVirtualAuthEndToEnd|TestCompatibilityEndToEnd' -count=1 -v -timeout 5m .
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            SSHD_LITE_TEST_WINDOWS_PTY=winpty go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -v -timeout 5m .
+          fi
   build:
     needs: [prepare, test]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -111,7 +114,7 @@ jobs:
           cp .build/source.tar.gz "dist/sshd-lite_${VERSION}_source.tar.gz"
           cp README.md dist/README.md
           cp .build/source/UPSTREAM_RELEASE .build/source/UPSTREAM_COMMIT .build/source/PATCH_REPOSITORY_COMMIT dist/
-          (cd dist && sha256sum ./*.tar.gz ./*.zip README.md UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
+          (cd dist && sha256sum ./*.tar.gz ./*.zip ./*.exe README.md UPSTREAM_RELEASE UPSTREAM_COMMIT PATCH_REPOSITORY_COMMIT > SHA256SUMS)
           printf 'Upstream release: %s\nPatched upstream: %s\nPatch repository commit: %s\n\nLinux, macOS and Windows source tests and SSH/PTY logins passed. Packaged executable verification is pending.\n\nSee README.md for environment and credential-file usage.\n' "$(cat .build/source/UPSTREAM_RELEASE)" "$UPSTREAM" "$GITHUB_SHA" > .build/release-notes.md
       - name: Upload draft release assets
         env:
@@ -163,7 +166,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
-          gh release download "$VERSION" --dir downloaded --pattern "sshd-lite_${VERSION}_${TARGET}.*" --pattern SHA256SUMS
+          if [[ "$TARGET" == windows_* ]]; then extension=exe; else extension=tar.gz; fi
+          gh release download "$VERSION" --dir downloaded --pattern "sshd-lite_${VERSION}_${TARGET}.${extension}" --pattern SHA256SUMS
       - name: Verify checksum and extract executable
         id: unpack
         run: python scripts/verify-archive.py downloaded
@@ -171,7 +175,12 @@ jobs:
         env:
           SSHD_LITE_TEST_BINARY: ${{ steps.unpack.outputs.binary }}
         working-directory: .build/source
-        run: go test -race -tags=integration -run 'TestVirtualAuthEndToEnd|TestCompatibilityEndToEnd' -count=1 -v -timeout 5m .
+
+        run: |
+          go test -race -tags=integration -run 'TestVirtualAuthEndToEnd|TestCompatibilityEndToEnd' -count=1 -v -timeout 5m .
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            SSHD_LITE_TEST_WINDOWS_PTY=winpty go test -race -tags=integration -run TestVirtualAuthEndToEnd -count=1 -v -timeout 5m .
+          fi
   publish:
     needs: [prepare, verify_release]
     runs-on: ubuntu-latest

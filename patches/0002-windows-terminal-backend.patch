@@ -1,0 +1,59 @@
+diff --git a/internal/terminal/process.go b/internal/terminal/process.go
+index 463b745..74eebf8 100644
+--- a/internal/terminal/process.go
++++ b/internal/terminal/process.go
+@@ -63,7 +63,13 @@ func (p *Process) Kill() error                       { return p.cmd.Process.Kill
+ func (p *Process) Resize(cols, rows uint16) error {
+ 	p.mu.Lock()
+ 	defer p.mu.Unlock()
+-	if p.released || !supportsRunningPTYResize {
++	if p.released {
++		return nil
++	}
++	if resizer, ok := p.PTY.(interface{ Resize(uint16, uint16) error }); ok {
++		return resizer.Resize(cols, rows)
++	}
++	if !supportsRunningPTYResize {
+ 		return nil
+ 	}
+ 	size, err := Dimensions(uint32(cols), uint32(rows))
+diff --git a/internal/terminal/pty_windows.go b/internal/terminal/pty_windows.go
+index 78dc8ec..606f4e0 100644
+--- a/internal/terminal/pty_windows.go
++++ b/internal/terminal/pty_windows.go
+@@ -7,6 +7,7 @@ import (
+ 	"errors"
+ 	"os/exec"
+ 
++	"github.com/jpillora/sshd-lite/internal/legacypty"
+ 	"github.com/jpillora/sshd-lite/winpty"
+ )
+ 
+@@ -17,6 +18,17 @@ const supportsRunningPTYResize = false
+ 
+ func init() {
+ 	startPTY = func(cmd *exec.Cmd, ws *Size) (PTY, error) {
++		useLegacy, err := selectLegacyBackend(windowsBackend, findConPTYProcedure)
++		if err != nil {
++			return nil, err
++		}
++		if useLegacy {
++			rows, cols := uint16(24), uint16(80)
++			if ws != nil {
++				rows, cols = ws.Rows, ws.Cols
++			}
++			return legacypty.Start(cmd, cols, rows)
++		}
+ 		var pws *winpty.Winsize
+ 		if ws != nil {
+ 			pws = &winpty.Winsize{Rows: ws.Rows, Cols: ws.Cols}
+@@ -35,5 +47,8 @@ func init() {
+ // so this is intentionally a no-op — the library unblocks the io.Copy goroutines
+ // when it closes the ConPTY's pipe ends.
+ func closeShellPTY(p PTY) {
+-	// no-op: the pty library closes the ConPTY itself
++	if p, ok := p.(*legacypty.PTY); ok {
++		_ = p.Close()
++	}
++	// ConPTY retains its original library ownership.
+ }
